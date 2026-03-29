@@ -48,6 +48,7 @@ aycallhome \
 | `--known-url` | `AYCALLHOME_KNOWN_URL` | *(required)* | URL to load/save known-devices table (JSON) |
 | `--unknown-url` | `AYCALLHOME_UNKNOWN_URL` | *(required)* | URL to save unknown-devices table (JSON) |
 | `--known-save-interval` | `AYCALLHOME_KNOWN_SAVE_INTERVAL` | `60` | Seconds between known-table saves |
+| `--required-token` | `AYCALLHOME_REQUIRED_TOKEN` | *(none)* | When set, requests must include a matching `token` parameter |
 
 ### Serials file format
 
@@ -138,7 +139,7 @@ event manager applet CALLHOME
  action 110 cli command "show version | inc uptime|IOS Softwa"
  action 115 regexp "Version ([A-Za-z0-9\.\(\)]+)" "$_cli_result" globalmatch VERSION
  action 120 regexp "([A-Za-z0-9-]+) uptime is" "$_cli_result" globalmatch HOSTNAME
- action 130 set URLARG "/serial=$SERIAL/hostname=$HOSTNAME/model=$MODEL/version=$VERSION"
+ action 130 set URLARG "/serial=$SERIAL/hostname=$HOSTNAME/model=$MODEL/version=$VERSION/token=not-so-secret"
  action 140 append URL "$URLARG"
  action 150 cli command "copy $URL null:"
  action 160 end

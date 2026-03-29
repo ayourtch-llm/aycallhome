@@ -43,6 +43,11 @@ pub struct Cli {
     /// Seconds between periodic saves of the known-devices table
     #[arg(long, env = "AYCALLHOME_KNOWN_SAVE_INTERVAL", default_value_t = 60)]
     pub known_save_interval: u64,
+
+    /// Required token value. When set, requests must include a matching
+    /// token parameter or they will be rejected.
+    #[arg(long, env = "AYCALLHOME_REQUIRED_TOKEN")]
+    pub required_token: Option<String>,
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -127,6 +132,27 @@ pub async fn register_handler(
             return (StatusCode::BAD_REQUEST, format!("Bad request: {}\n", e)).into_response();
         }
     };
+
+    // Check required token if configured
+    if let Some(ref required) = state.config.required_token {
+        match &params.token {
+            Some(token) if token == required => {}
+            Some(token) => {
+                warn!(
+                    "rejected callhome from {} (serial={}): invalid token '{}'",
+                    addr, params.serial, token
+                );
+                return (StatusCode::FORBIDDEN, "Forbidden: invalid token\n").into_response();
+            }
+            None => {
+                warn!(
+                    "rejected callhome from {} (serial={}): missing token",
+                    addr, params.serial
+                );
+                return (StatusCode::FORBIDDEN, "Forbidden: missing token\n").into_response();
+            }
+        }
+    }
 
     let (is_ipv4, ip_str) = classify_ip(&addr.ip());
     let now = Utc::now();
@@ -366,6 +392,10 @@ mod tests {
     // .http_transport().build(app).
 
     fn make_test_state() -> Arc<AppState> {
+        make_test_state_with_token(None)
+    }
+
+    fn make_test_state_with_token(required_token: Option<String>) -> Arc<AppState> {
         let cli = Cli {
             listen_addr: "::".to_string(),
             port: 8080,
@@ -373,6 +403,7 @@ mod tests {
             known_url: "file:///dev/null".to_string(),
             unknown_url: "file:///dev/null".to_string(),
             known_save_interval: 60,
+            required_token,
         };
         AppState::new(cli)
     }
@@ -539,6 +570,116 @@ mod tests {
         assert_eq!(known["MIX001"].hostname.as_deref(), Some("sw-mixed"));
     }
 
+    // ── token authentication ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_token_required_valid_token_accepted() {
+        let state = make_test_state_with_token(Some("not-so-secret".to_string()));
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("TOK001".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx/serial=TOK001/token=not-so-secret")
+            .await;
+        assert_eq!(resp.status_code(), 200);
+
+        let known = state.known_devices.read().await;
+        assert!(known.contains_key("TOK001"));
+    }
+
+    #[tokio::test]
+    async fn test_token_required_wrong_token_rejected() {
+        let state = make_test_state_with_token(Some("not-so-secret".to_string()));
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("TOK002".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx/serial=TOK002/token=wrong")
+            .await;
+        assert_eq!(resp.status_code(), 403);
+
+        let known = state.known_devices.read().await;
+        assert!(!known.contains_key("TOK002"), "device must not be added with wrong token");
+    }
+
+    #[tokio::test]
+    async fn test_token_required_missing_token_rejected() {
+        let state = make_test_state_with_token(Some("not-so-secret".to_string()));
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("TOK003".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx/serial=TOK003/hostname=sw1")
+            .await;
+        assert_eq!(resp.status_code(), 403);
+
+        let known = state.known_devices.read().await;
+        assert!(!known.contains_key("TOK003"), "device must not be added without token");
+    }
+
+    #[tokio::test]
+    async fn test_token_required_unknown_device_also_rejected() {
+        let state = make_test_state_with_token(Some("not-so-secret".to_string()));
+        // No permitted serials — device would be unknown
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx/serial=TOK004")
+            .await;
+        assert_eq!(resp.status_code(), 403);
+
+        let unknown = state.unknown_devices.read().await;
+        assert!(!unknown.contains_key("TOK004"), "device must not be added to unknown without token");
+    }
+
+    #[tokio::test]
+    async fn test_no_token_required_accepts_without_token() {
+        // Default: no required token
+        let state = make_test_state();
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("NOTOK01".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx/serial=NOTOK01")
+            .await;
+        assert_eq!(resp.status_code(), 200);
+    }
+
+    #[tokio::test]
+    async fn test_token_via_query_param() {
+        let state = make_test_state_with_token(Some("not-so-secret".to_string()));
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("TOKQ01".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx?serial=TOKQ01&token=not-so-secret")
+            .await;
+        assert_eq!(resp.status_code(), 200);
+
+        let known = state.known_devices.read().await;
+        assert!(known.contains_key("TOKQ01"));
+    }
+
     #[tokio::test]
     async fn test_register_any_parameter_order_accepted() {
         let state = make_test_state();
@@ -645,6 +786,7 @@ mod tests {
             known_url: "file:///dev/null".to_string(),
             unknown_url: "file:///dev/null".to_string(),
             known_save_interval: 60,
+            required_token: None,
         };
         let state = AppState::new(cli);
 
@@ -736,6 +878,7 @@ mod tests {
             known_url: "file:///dev/null".to_string(),
             unknown_url: "file:///dev/null".to_string(),
             known_save_interval: 60,
+            required_token: None,
         };
         let state = AppState::new(cli);
 
