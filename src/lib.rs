@@ -11,6 +11,7 @@ pub struct KnownDevice {
     pub version: Option<String>,
     pub hostname: Option<String>,
     pub model: Option<String>,
+    pub token: Option<String>,
     pub last_ipv4: Option<String>,
     pub last_ipv6: Option<String>,
     pub last_seen_ipv4: Option<DateTime<Utc>>,
@@ -23,6 +24,7 @@ pub struct UnknownDevice {
     pub version: Option<String>,
     pub hostname: Option<String>,
     pub model: Option<String>,
+    pub token: Option<String>,
     pub last_ipv4: Option<String>,
     pub last_ipv6: Option<String>,
     pub last_seen_ipv4: Option<DateTime<Utc>>,
@@ -39,6 +41,7 @@ pub struct CallhomeParams {
     pub hostname: Option<String>,
     pub model: Option<String>,
     pub version: Option<String>,
+    pub token: Option<String>,
 }
 
 /// Parse key=value path segments after `/Register.aspx/`.
@@ -95,6 +98,7 @@ pub fn parse_callhome_params(path: &str, query: Option<&str>) -> Result<Callhome
         hostname: map.remove("hostname"),
         model: map.remove("model"),
         version: map.remove("version"),
+        token: map.remove("token"),
     })
 }
 
@@ -498,6 +502,7 @@ mod tests {
                 version: Some("17.03".to_string()),
                 hostname: Some("sw1".to_string()),
                 model: Some("C9300".to_string()),
+                token: None,
                 last_ipv4: Some("10.0.0.1".to_string()),
                 last_ipv6: None,
                 last_seen_ipv4: None,
@@ -526,6 +531,7 @@ mod tests {
                 version: Some("15.6".to_string()),
                 hostname: Some("rogue".to_string()),
                 model: Some("ISR".to_string()),
+                token: None,
                 last_ipv4: None,
                 last_ipv6: None,
                 last_seen_ipv4: None,
@@ -580,6 +586,7 @@ mod tests {
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
                     model: Some("m".to_string()),
+                    token: None,
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,

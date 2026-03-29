@@ -145,6 +145,7 @@ pub async fn register_handler(
                 version: None,
                 hostname: None,
                 model: None,
+                token: None,
                 last_ipv4: None,
                 last_ipv6: None,
                 last_seen_ipv4: None,
@@ -158,6 +159,9 @@ pub async fn register_handler(
         }
         if params.model.is_some() {
             entry.model = params.model.clone();
+        }
+        if params.token.is_some() {
+            entry.token = params.token.clone();
         }
         if is_ipv4 {
             entry.last_ipv4 = Some(ip_str.clone());
@@ -192,6 +196,7 @@ pub async fn register_handler(
                         version: None,
                         hostname: None,
                         model: None,
+                        token: None,
                         last_ipv4: None,
                         last_ipv6: None,
                         last_seen_ipv4: None,
@@ -207,6 +212,9 @@ pub async fn register_handler(
             }
             if params.model.is_some() {
                 entry.model = params.model.clone();
+            }
+            if params.token.is_some() {
+                entry.token = params.token.clone();
             }
             entry.last_seen = now;
             if is_ipv4 {
@@ -651,6 +659,7 @@ mod tests {
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
                     model: Some("m".to_string()),
+                    token: None,
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,
@@ -742,6 +751,7 @@ mod tests {
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
                     model: Some("m".to_string()),
+                    token: None,
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,
@@ -757,6 +767,7 @@ mod tests {
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
                     model: Some("m".to_string()),
+                    token: None,
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,
