@@ -8,9 +8,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct KnownDevice {
     pub serial: String,
-    pub version: String,
-    pub hostname: String,
-    pub model: String,
+    pub version: Option<String>,
+    pub hostname: Option<String>,
+    pub model: Option<String>,
     pub last_ipv4: Option<String>,
     pub last_ipv6: Option<String>,
     pub last_seen_ipv4: Option<DateTime<Utc>>,
@@ -20,9 +20,9 @@ pub struct KnownDevice {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UnknownDevice {
     pub serial: String,
-    pub version: String,
-    pub hostname: String,
-    pub model: String,
+    pub version: Option<String>,
+    pub hostname: Option<String>,
+    pub model: Option<String>,
     pub last_ipv4: Option<String>,
     pub last_ipv6: Option<String>,
     pub last_seen_ipv4: Option<DateTime<Utc>>,
@@ -36,9 +36,9 @@ pub struct UnknownDevice {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallhomeParams {
     pub serial: String,
-    pub hostname: String,
-    pub model: String,
-    pub version: String,
+    pub hostname: Option<String>,
+    pub model: Option<String>,
+    pub version: Option<String>,
 }
 
 /// Parse key=value path segments after `/Register.aspx/`.
@@ -63,16 +63,15 @@ pub fn parse_callhome_path(path: &str) -> Result<CallhomeParams, String> {
         }
     }
 
-    let mut get = |key: &str| -> Result<String, String> {
-        map.remove(key)
-            .ok_or_else(|| format!("missing required parameter: '{}'", key))
-    };
+    let serial = map
+        .remove("serial")
+        .ok_or_else(|| "missing required parameter: 'serial'".to_string())?;
 
     Ok(CallhomeParams {
-        serial: get("serial")?,
-        hostname: get("hostname")?,
-        model: get("model")?,
-        version: get("version")?,
+        serial,
+        hostname: map.remove("hostname"),
+        model: map.remove("model"),
+        version: map.remove("version"),
     })
 }
 
@@ -243,9 +242,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.serial, "FCW1234");
-        assert_eq!(p.hostname, "router1");
-        assert_eq!(p.model, "C9300");
-        assert_eq!(p.version, "17.03");
+        assert_eq!(p.hostname.as_deref(), Some("router1"));
+        assert_eq!(p.model.as_deref(), Some("C9300"));
+        assert_eq!(p.version.as_deref(), Some("17.03"));
     }
 
     #[test]
@@ -255,9 +254,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.serial, "FCW1234");
-        assert_eq!(p.hostname, "router1");
-        assert_eq!(p.model, "C9300");
-        assert_eq!(p.version, "17.03");
+        assert_eq!(p.hostname.as_deref(), Some("router1"));
+        assert_eq!(p.model.as_deref(), Some("C9300"));
+        assert_eq!(p.version.as_deref(), Some("17.03"));
     }
 
     #[test]
@@ -270,38 +269,24 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_missing_hostname() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/model=C9300/version=17.03",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("hostname"),
-            "expected 'hostname' in error: {}",
-            err
-        );
+    fn test_parse_serial_only() {
+        let p = parse_callhome_path("/Register.aspx/serial=FCW1234").unwrap();
+        assert_eq!(p.serial, "FCW1234");
+        assert_eq!(p.hostname, None);
+        assert_eq!(p.model, None);
+        assert_eq!(p.version, None);
     }
 
     #[test]
-    fn test_parse_missing_model() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/hostname=router1/version=17.03",
+    fn test_parse_partial_params() {
+        let p = parse_callhome_path(
+            "/Register.aspx/serial=FCW1234/hostname=router1",
         )
-        .unwrap_err();
-        assert!(err.contains("model"), "expected 'model' in error: {}", err);
-    }
-
-    #[test]
-    fn test_parse_missing_version() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/hostname=router1/model=C9300",
-        )
-        .unwrap_err();
-        assert!(
-            err.contains("version"),
-            "expected 'version' in error: {}",
-            err
-        );
+        .unwrap();
+        assert_eq!(p.serial, "FCW1234");
+        assert_eq!(p.hostname.as_deref(), Some("router1"));
+        assert_eq!(p.model, None);
+        assert_eq!(p.version, None);
     }
 
     #[test]
@@ -327,7 +312,7 @@ mod tests {
             "/Register.aspx/serial=FCW1234/hostname=router1/model=ISR4331/version=15.6(3)M7",
         )
         .unwrap();
-        assert_eq!(p.version, "15.6(3)M7");
+        assert_eq!(p.version.as_deref(), Some("15.6(3)M7"));
     }
 
     // ── parse_serial_whitelist ───────────────────────────────────────────────
@@ -426,9 +411,9 @@ mod tests {
             "SN001".to_string(),
             KnownDevice {
                 serial: "SN001".to_string(),
-                version: "17.03".to_string(),
-                hostname: "sw1".to_string(),
-                model: "C9300".to_string(),
+                version: Some("17.03".to_string()),
+                hostname: Some("sw1".to_string()),
+                model: Some("C9300".to_string()),
                 last_ipv4: Some("10.0.0.1".to_string()),
                 last_ipv6: None,
                 last_seen_ipv4: None,
@@ -439,7 +424,7 @@ mod tests {
         save_known_devices(&url, &devices).await.unwrap();
         let loaded = load_known_devices(&url).await;
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded["SN001"].hostname, "sw1");
+        assert_eq!(loaded["SN001"].hostname.as_deref(), Some("sw1"));
     }
 
     #[tokio::test]
@@ -454,9 +439,9 @@ mod tests {
             "ROGUE".to_string(),
             UnknownDevice {
                 serial: "ROGUE".to_string(),
-                version: "15.6".to_string(),
-                hostname: "rogue".to_string(),
-                model: "ISR".to_string(),
+                version: Some("15.6".to_string()),
+                hostname: Some("rogue".to_string()),
+                model: Some("ISR".to_string()),
                 last_ipv4: None,
                 last_ipv6: None,
                 last_seen_ipv4: None,
@@ -469,7 +454,7 @@ mod tests {
         save_unknown_devices(&url, &devices).await.unwrap();
         let loaded = load_unknown_devices(&url).await;
         assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded["ROGUE"].hostname, "rogue");
+        assert_eq!(loaded["ROGUE"].hostname.as_deref(), Some("rogue"));
     }
 
     #[tokio::test]
@@ -508,9 +493,9 @@ mod tests {
                 serial.to_string(),
                 KnownDevice {
                     serial: serial.to_string(),
-                    version: "1".to_string(),
-                    hostname: "h".to_string(),
-                    model: "m".to_string(),
+                    version: Some("1".to_string()),
+                    hostname: Some("h".to_string()),
+                    model: Some("m".to_string()),
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,

@@ -141,17 +141,23 @@ pub async fn register_handler(
             .entry(params.serial.clone())
             .or_insert_with(|| KnownDevice {
                 serial: params.serial.clone(),
-                version: params.version.clone(),
-                hostname: params.hostname.clone(),
-                model: params.model.clone(),
+                version: None,
+                hostname: None,
+                model: None,
                 last_ipv4: None,
                 last_ipv6: None,
                 last_seen_ipv4: None,
                 last_seen_ipv6: None,
             });
-        entry.version = params.version.clone();
-        entry.hostname = params.hostname.clone();
-        entry.model = params.model.clone();
+        if params.version.is_some() {
+            entry.version = params.version.clone();
+        }
+        if params.hostname.is_some() {
+            entry.hostname = params.hostname.clone();
+        }
+        if params.model.is_some() {
+            entry.model = params.model.clone();
+        }
         if is_ipv4 {
             entry.last_ipv4 = Some(ip_str.clone());
             entry.last_seen_ipv4 = Some(now);
@@ -182,9 +188,9 @@ pub async fn register_handler(
                     .entry(params.serial.clone())
                     .or_insert_with(|| UnknownDevice {
                         serial: params.serial.clone(),
-                        version: params.version.clone(),
-                        hostname: params.hostname.clone(),
-                        model: params.model.clone(),
+                        version: None,
+                        hostname: None,
+                        model: None,
                         last_ipv4: None,
                         last_ipv6: None,
                         last_seen_ipv4: None,
@@ -192,9 +198,15 @@ pub async fn register_handler(
                         first_seen: now,
                         last_seen: now,
                     });
-            entry.version = params.version.clone();
-            entry.hostname = params.hostname.clone();
-            entry.model = params.model.clone();
+            if params.version.is_some() {
+                entry.version = params.version.clone();
+            }
+            if params.hostname.is_some() {
+                entry.hostname = params.hostname.clone();
+            }
+            if params.model.is_some() {
+                entry.model = params.model.clone();
+            }
             entry.last_seen = now;
             if is_ipv4 {
                 entry.last_ipv4 = Some(ip_str.clone());
@@ -428,9 +440,9 @@ mod tests {
             "device should be in known table"
         );
         let dev = &known["FCW5678"];
-        assert_eq!(dev.hostname, "sw-floor2");
-        assert_eq!(dev.model, "C9300-48P");
-        assert_eq!(dev.version, "17.03.04a");
+        assert_eq!(dev.hostname.as_deref(), Some("sw-floor2"));
+        assert_eq!(dev.model.as_deref(), Some("C9300-48P"));
+        assert_eq!(dev.version.as_deref(), Some("17.03.04a"));
     }
 
     #[tokio::test]
@@ -518,8 +530,8 @@ mod tests {
 
         let known = state.known_devices.read().await;
         let dev = &known["FCW0001"];
-        assert_eq!(dev.hostname, "new-name");
-        assert_eq!(dev.version, "17.05");
+        assert_eq!(dev.hostname.as_deref(), Some("new-name"));
+        assert_eq!(dev.version.as_deref(), Some("17.05"));
     }
 
     #[tokio::test]
@@ -592,9 +604,9 @@ mod tests {
                 "KEEP".to_string(),
                 UnknownDevice {
                     serial: "KEEP".to_string(),
-                    version: "1".to_string(),
-                    hostname: "h".to_string(),
-                    model: "m".to_string(),
+                    version: Some("1".to_string()),
+                    hostname: Some("h".to_string()),
+                    model: Some("m".to_string()),
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,
@@ -683,9 +695,9 @@ mod tests {
                 "OLD".to_string(),
                 UnknownDevice {
                     serial: "OLD".to_string(),
-                    version: "1".to_string(),
-                    hostname: "h".to_string(),
-                    model: "m".to_string(),
+                    version: Some("1".to_string()),
+                    hostname: Some("h".to_string()),
+                    model: Some("m".to_string()),
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,
@@ -698,9 +710,9 @@ mod tests {
                 "RECENT".to_string(),
                 UnknownDevice {
                     serial: "RECENT".to_string(),
-                    version: "1".to_string(),
-                    hostname: "h".to_string(),
-                    model: "m".to_string(),
+                    version: Some("1".to_string()),
+                    hostname: Some("h".to_string()),
+                    model: Some("m".to_string()),
                     last_ipv4: None,
                     last_ipv6: None,
                     last_seen_ipv4: None,
