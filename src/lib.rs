@@ -44,22 +44,45 @@ pub struct CallhomeParams {
 /// Parse key=value path segments after `/Register.aspx/`.
 /// Returns `Ok(CallhomeParams)` or an error string describing what's missing/malformed.
 pub fn parse_callhome_path(path: &str) -> Result<CallhomeParams, String> {
-    // Strip the leading "/Register.aspx/" prefix (case-sensitive per spec)
-    let rest = path
-        .strip_prefix("/Register.aspx/")
-        .ok_or_else(|| format!("path does not start with /Register.aspx/: {}", path))?;
+    parse_callhome_params(path, None)
+}
 
+/// Parse callhome parameters from path segments and/or query string.
+///
+/// Path segments (`/Register.aspx/serial=X/hostname=Y`) and query parameters
+/// (`?serial=X&hostname=Y`) are both supported and can be mixed. When a key
+/// appears in both, the query parameter takes precedence.
+pub fn parse_callhome_params(path: &str, query: Option<&str>) -> Result<CallhomeParams, String> {
     let mut map: HashMap<String, String> = HashMap::new();
-    for segment in rest.split('/') {
-        if segment.is_empty() {
-            continue;
+
+    // Parse path segments after /Register.aspx/
+    if let Some(rest) = path.strip_prefix("/Register.aspx/") {
+        for segment in rest.split('/') {
+            if segment.is_empty() {
+                continue;
+            }
+            let mut parts = segment.splitn(2, '=');
+            match (parts.next(), parts.next()) {
+                (Some(k), Some(v)) => {
+                    map.insert(k.to_ascii_lowercase(), v.to_string());
+                }
+                _ => return Err(format!("malformed path segment: '{}'", segment)),
+            }
         }
-        let mut parts = segment.splitn(2, '=');
-        match (parts.next(), parts.next()) {
-            (Some(k), Some(v)) => {
+    } else if path != "/Register.aspx" {
+        return Err(format!("path does not start with /Register.aspx: {}", path));
+    }
+
+    // Parse query parameters (override path values)
+    if let Some(qs) = query {
+        for pair in qs.split('&') {
+            if pair.is_empty() {
+                continue;
+            }
+            let mut parts = pair.splitn(2, '=');
+            if let (Some(k), Some(v)) = (parts.next(), parts.next()) {
                 map.insert(k.to_ascii_lowercase(), v.to_string());
             }
-            _ => return Err(format!("malformed path segment: '{}'", segment)),
         }
     }
 
@@ -313,6 +336,67 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.version.as_deref(), Some("15.6(3)M7"));
+    }
+
+    // ── parse_callhome_params with query parameters ───────────────────────
+
+    #[test]
+    fn test_parse_query_params_only() {
+        let p = parse_callhome_params(
+            "/Register.aspx",
+            Some("serial=FCW1234&hostname=router1&model=C9300&version=17.03"),
+        )
+        .unwrap();
+        assert_eq!(p.serial, "FCW1234");
+        assert_eq!(p.hostname.as_deref(), Some("router1"));
+        assert_eq!(p.model.as_deref(), Some("C9300"));
+        assert_eq!(p.version.as_deref(), Some("17.03"));
+    }
+
+    #[test]
+    fn test_parse_query_params_serial_only() {
+        let p = parse_callhome_params(
+            "/Register.aspx",
+            Some("serial=FCW1234"),
+        )
+        .unwrap();
+        assert_eq!(p.serial, "FCW1234");
+        assert_eq!(p.hostname, None);
+    }
+
+    #[test]
+    fn test_parse_mixed_path_and_query() {
+        // Serial in path, rest in query
+        let p = parse_callhome_params(
+            "/Register.aspx/serial=FCW1234",
+            Some("hostname=router1&model=C9300"),
+        )
+        .unwrap();
+        assert_eq!(p.serial, "FCW1234");
+        assert_eq!(p.hostname.as_deref(), Some("router1"));
+        assert_eq!(p.model.as_deref(), Some("C9300"));
+        assert_eq!(p.version, None);
+    }
+
+    #[test]
+    fn test_parse_query_overrides_path() {
+        // hostname in both — query wins
+        let p = parse_callhome_params(
+            "/Register.aspx/serial=FCW1234/hostname=old",
+            Some("hostname=new"),
+        )
+        .unwrap();
+        assert_eq!(p.hostname.as_deref(), Some("new"));
+    }
+
+    #[test]
+    fn test_parse_query_missing_serial() {
+        let err = parse_callhome_params(
+            "/Register.aspx",
+            Some("hostname=router1"),
+        )
+        .unwrap_err();
+        assert!(err.contains("serial"));
     }
 
     // ── parse_serial_whitelist ───────────────────────────────────────────────

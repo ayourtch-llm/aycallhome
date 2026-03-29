@@ -118,8 +118,9 @@ pub async fn register_handler(
     axum::extract::OriginalUri(uri): axum::extract::OriginalUri,
 ) -> Response {
     let path = uri.path();
+    let query = uri.query();
 
-    let params = match parse_callhome_path(path) {
+    let params = match parse_callhome_params(path, query) {
         Ok(p) => p,
         Err(e) => {
             warn!("bad callhome request ({}): {}", addr, e);
@@ -247,6 +248,7 @@ async fn fallback_handler(req: axum::extract::Request) -> impl IntoResponse {
 
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/Register.aspx", get(register_handler))
         .route("/Register.aspx/{*rest}", get(register_handler))
         .fallback(fallback_handler)
         .with_state(state)
@@ -485,6 +487,48 @@ mod tests {
             .get("/Register.aspx/hostname=router1/model=C9300/version=17.03")
             .await;
         assert_eq!(resp.status_code(), 400);
+    }
+
+    #[tokio::test]
+    async fn test_register_via_query_params() {
+        let state = make_test_state();
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("QRY001".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx?serial=QRY001&hostname=sw-query&model=C9300&version=17.03")
+            .await;
+        assert_eq!(resp.status_code(), 200);
+
+        let known = state.known_devices.read().await;
+        assert!(known.contains_key("QRY001"));
+        let dev = &known["QRY001"];
+        assert_eq!(dev.hostname.as_deref(), Some("sw-query"));
+        assert_eq!(dev.model.as_deref(), Some("C9300"));
+    }
+
+    #[tokio::test]
+    async fn test_register_via_mixed_path_and_query() {
+        let state = make_test_state();
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("MIX001".to_string());
+
+        let server = make_test_server(state.clone());
+        let resp = server
+            .get("/Register.aspx/serial=MIX001?hostname=sw-mixed&model=C9300")
+            .await;
+        assert_eq!(resp.status_code(), 200);
+
+        let known = state.known_devices.read().await;
+        assert!(known.contains_key("MIX001"));
+        assert_eq!(known["MIX001"].hostname.as_deref(), Some("sw-mixed"));
     }
 
     #[tokio::test]
