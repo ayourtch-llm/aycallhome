@@ -318,9 +318,25 @@ pub async fn register_handler(
 
 // ─── Router builder (shared with integration tests) ─────────────────────────
 
+async fn fallback_handler(req: axum::extract::Request) -> impl IntoResponse {
+    let remote = req
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ConnectInfo(addr)| addr.to_string())
+        .unwrap_or_else(|| "unknown".to_string());
+    warn!(
+        remote = %remote,
+        method = %req.method(),
+        uri = %req.uri(),
+        "request to unknown URL"
+    );
+    (StatusCode::NOT_FOUND, "Not Found\n")
+}
+
 pub fn build_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/Register.aspx/{*rest}", get(register_handler))
+        .fallback(fallback_handler)
         .with_state(state)
 }
 
@@ -440,9 +456,7 @@ async fn main() {
     tokio::spawn(save_known_task(state.clone()));
     tokio::spawn(save_unknown_task(state.clone()));
 
-    let router = Router::new()
-        .route("/Register.aspx/{*rest}", get(register_handler))
-        .with_state(state.clone());
+    let router = build_router(state.clone());
 
     let bind_addr = format!("{}:{}", cli.listen_addr, cli.port);
     let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap_or_else(|e| {
@@ -657,13 +671,19 @@ mod tests {
     }
 
     fn make_test_server(state: Arc<AppState>) -> axum_test::TestServer {
-        let app = Router::new()
-            .route("/Register.aspx/{*rest}", get(register_handler))
-            .with_state(state)
+        let app = build_router(state)
             .into_make_service_with_connect_info::<SocketAddr>();
         axum_test::TestServer::builder()
             .http_transport()
             .build(app)
+    }
+
+    #[tokio::test]
+    async fn test_unknown_url_returns_404() {
+        let state = make_test_state();
+        let server = make_test_server(state);
+        let resp = server.get("/some/random/path").await;
+        assert_eq!(resp.status_code(), 404);
     }
 
     #[tokio::test]

@@ -1,9 +1,12 @@
 !
-event manager applet CALLHOME
- event timer watchdog time 300
- ! Variable Initialisation
+no event manager applet CALLHOME
+no event manager applet CALLHOME6
+ipv6 host callhomev6 2A02:1811:1C88:7500:32C5:99FF:FE3F:94A3
+!
+event manager applet CALLHOME6
+ event timer watchdog time 30
  action 010 cli command "enable"
- action 020 set URL "http://192.168.0.121/Register.aspx"
+ action 020 set URL "http://[2A02:1811:1C88:7500:32C5:99FF:FE3F:94A3]:80/Register.aspx"
  action 030 set HOSTNAME "unknown"
  action 040 set SERIAL "unknown"
  action 050 set MODEL "unknown"
@@ -24,3 +27,29 @@ event manager applet CALLHOME
  action 150 cli command "copy $URL null:"
  action 160 end
 !
+event manager applet CALLHOME
+ event timer watchdog time 30
+ ! Variable Initialisation
+ action 010 cli command "enable"
+ action 020 set URL "http://192.168.0.121:80/Register.aspx"
+ action 030 set HOSTNAME "unknown"
+ action 040 set SERIAL "unknown"
+ action 050 set MODEL "unknown"
+ action 055 set VERSION "unknown"
+ ! Retrieve device serial number and model
+ action 060 cli command "show inventory"
+ action 070 regexp "[Pp][Ii][Dd]:\s*([A-Za-z0-9\-]*)[^\n]*[Ss][Nn]:\s*([A-Z0-9]*)" "$_cli_result" globalmatch MODEL SERIAL
+ action 080 if $_regexp_result eq 0
+ action 090 syslog priority errors msg "Unable to retrive serial or model from device inventory, please report the contents of 'show inventory'"
+ action 100 else
+ ! Retrieve device hostname and version
+ action 110 cli command "show version | inc uptime|IOS Softwa"
+ action 115 regexp "Version ([A-Za-z0-9\.\(\)]+)" "$_cli_result" globalmatch VERSION
+ action 120 regexp "([A-Za-z0-9-]+) uptime is" "$_cli_result" globalmatch HOSTNAME
+ ! Perform Callhome
+ action 130 set URLARG "/serial=$SERIAL/hostname=$HOSTNAME/model=$MODEL/version=$VERSION"
+ action 140 append URL "$URLARG"
+ action 150 cli command "copy $URL null:"
+ action 160 end
+!
+
