@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 // ─── Data model ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct KnownDevice {
+pub struct Device {
     pub serial: String,
     pub version: Option<String>,
     pub hostname: Option<String>,
@@ -16,21 +16,20 @@ pub struct KnownDevice {
     pub last_ipv6: Option<String>,
     pub last_seen_ipv4: Option<DateTime<Utc>>,
     pub last_seen_ipv6: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_seen: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct UnknownDevice {
-    pub serial: String,
-    pub version: Option<String>,
-    pub hostname: Option<String>,
-    pub model: Option<String>,
-    pub token: Option<String>,
-    pub last_ipv4: Option<String>,
-    pub last_ipv6: Option<String>,
-    pub last_seen_ipv4: Option<DateTime<Utc>>,
-    pub last_seen_ipv6: Option<DateTime<Utc>>,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
+impl Device {
+    /// Returns the most recent time this device was seen, across IPv4 and IPv6.
+    pub fn last_seen(&self) -> Option<DateTime<Utc>> {
+        match (self.last_seen_ipv4, self.last_seen_ipv6) {
+            (Some(v4), Some(v6)) => Some(v4.max(v6)),
+            (Some(v4), None) => Some(v4),
+            (None, Some(v6)) => Some(v6),
+            (None, None) => None,
+        }
+    }
 }
 
 // ─── CallhomeParams (parsed from URL path) ──────────────────────────────────
@@ -153,16 +152,16 @@ pub fn classify_ip(addr: &std::net::IpAddr) -> (bool, String) {
 
 // ─── URL-based load/save helpers ────────────────────────────────────────────
 
-/// Load known devices from a URL (JSON array).
+/// Load devices from a URL (JSON array).
 /// Returns an empty map if the URL is empty or unreachable.
-pub async fn load_known_devices(url: &str) -> HashMap<String, KnownDevice> {
+pub async fn load_devices(url: &str) -> HashMap<String, Device> {
     match ayurl::get(url).await {
         Ok(resp) => match resp.text().await {
             Ok(text) if !text.trim().is_empty() => {
-                match serde_json::from_str::<Vec<KnownDevice>>(&text) {
+                match serde_json::from_str::<Vec<Device>>(&text) {
                     Ok(devices) => devices.into_iter().map(|d| (d.serial.clone(), d)).collect(),
                     Err(e) => {
-                        tracing::warn!("failed to parse known devices JSON from {}: {}", url, e);
+                        tracing::warn!("failed to parse devices JSON from {}: {}", url, e);
                         HashMap::new()
                     }
                 }
@@ -170,34 +169,7 @@ pub async fn load_known_devices(url: &str) -> HashMap<String, KnownDevice> {
             _ => HashMap::new(),
         },
         Err(e) => {
-            tracing::warn!("could not load known devices from {}: {}", url, e);
-            HashMap::new()
-        }
-    }
-}
-
-/// Load unknown devices from a URL (JSON array).
-/// Returns an empty map if the URL is empty or unreachable.
-pub async fn load_unknown_devices(url: &str) -> HashMap<String, UnknownDevice> {
-    match ayurl::get(url).await {
-        Ok(resp) => match resp.text().await {
-            Ok(text) if !text.trim().is_empty() => {
-                match serde_json::from_str::<Vec<UnknownDevice>>(&text) {
-                    Ok(devices) => devices.into_iter().map(|d| (d.serial.clone(), d)).collect(),
-                    Err(e) => {
-                        tracing::warn!(
-                            "failed to parse unknown devices JSON from {}: {}",
-                            url,
-                            e
-                        );
-                        HashMap::new()
-                    }
-                }
-            }
-            _ => HashMap::new(),
-        },
-        Err(e) => {
-            tracing::warn!("could not load unknown devices from {}: {}", url, e);
+            tracing::warn!("could not load devices from {}: {}", url, e);
             HashMap::new()
         }
     }
@@ -221,35 +193,19 @@ pub async fn load_serial_whitelist(url: &str) -> HashSet<String> {
     }
 }
 
-/// Save known devices to a URL as sorted, pretty-printed JSON.
-pub async fn save_known_devices(
+/// Save devices to a URL as sorted, pretty-printed JSON.
+pub async fn save_devices(
     url: &str,
-    devices: &HashMap<String, KnownDevice>,
+    devices: &HashMap<String, Device>,
 ) -> Result<(), String> {
-    let mut sorted: Vec<&KnownDevice> = devices.values().collect();
+    let mut sorted: Vec<&Device> = devices.values().collect();
     sorted.sort_by(|a, b| a.serial.cmp(&b.serial));
     let json = serde_json::to_string_pretty(&sorted)
-        .map_err(|e| format!("failed to serialize known devices: {}", e))?;
+        .map_err(|e| format!("failed to serialize devices: {}", e))?;
     ayurl::put(url)
         .text(json)
         .await
-        .map_err(|e| format!("failed to save known devices to {}: {}", url, e))?;
-    Ok(())
-}
-
-/// Save unknown devices to a URL as sorted, pretty-printed JSON.
-pub async fn save_unknown_devices(
-    url: &str,
-    devices: &HashMap<String, UnknownDevice>,
-) -> Result<(), String> {
-    let mut sorted: Vec<&UnknownDevice> = devices.values().collect();
-    sorted.sort_by(|a, b| a.serial.cmp(&b.serial));
-    let json = serde_json::to_string_pretty(&sorted)
-        .map_err(|e| format!("failed to serialize unknown devices: {}", e))?;
-    ayurl::put(url)
-        .text(json)
-        .await
-        .map_err(|e| format!("failed to save unknown devices to {}: {}", url, e))?;
+        .map_err(|e| format!("failed to save devices to {}: {}", url, e))?;
     Ok(())
 }
 
@@ -486,18 +442,74 @@ mod tests {
         assert_eq!(s, "192.168.1.1");
     }
 
+    // ── Device::last_seen ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_last_seen_both() {
+        let earlier = Utc::now() - chrono::Duration::minutes(5);
+        let later = Utc::now();
+        let dev = Device {
+            serial: "X".to_string(),
+            version: None,
+            hostname: None,
+            model: None,
+            token: None,
+            last_ipv4: None,
+            last_ipv6: None,
+            last_seen_ipv4: Some(earlier),
+            last_seen_ipv6: Some(later),
+            first_seen: None,
+        };
+        assert_eq!(dev.last_seen(), Some(later));
+    }
+
+    #[test]
+    fn test_last_seen_ipv4_only() {
+        let now = Utc::now();
+        let dev = Device {
+            serial: "X".to_string(),
+            version: None,
+            hostname: None,
+            model: None,
+            token: None,
+            last_ipv4: None,
+            last_ipv6: None,
+            last_seen_ipv4: Some(now),
+            last_seen_ipv6: None,
+            first_seen: None,
+        };
+        assert_eq!(dev.last_seen(), Some(now));
+    }
+
+    #[test]
+    fn test_last_seen_neither() {
+        let dev = Device {
+            serial: "X".to_string(),
+            version: None,
+            hostname: None,
+            model: None,
+            token: None,
+            last_ipv4: None,
+            last_ipv6: None,
+            last_seen_ipv4: None,
+            last_seen_ipv6: None,
+            first_seen: None,
+        };
+        assert_eq!(dev.last_seen(), None);
+    }
+
     // ── load/save helpers ───────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn test_load_known_devices_roundtrip() {
+    async fn test_load_devices_roundtrip() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("known.json");
+        let path = dir.path().join("devices.json");
         let url = format!("file://{}", path.display());
 
         let mut devices = HashMap::new();
         devices.insert(
             "SN001".to_string(),
-            KnownDevice {
+            Device {
                 serial: "SN001".to_string(),
                 version: Some("17.03".to_string()),
                 hostname: Some("sw1".to_string()),
@@ -507,26 +519,27 @@ mod tests {
                 last_ipv6: None,
                 last_seen_ipv4: None,
                 last_seen_ipv6: None,
+                first_seen: None,
             },
         );
 
-        save_known_devices(&url, &devices).await.unwrap();
-        let loaded = load_known_devices(&url).await;
+        save_devices(&url, &devices).await.unwrap();
+        let loaded = load_devices(&url).await;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded["SN001"].hostname.as_deref(), Some("sw1"));
     }
 
     #[tokio::test]
-    async fn test_load_unknown_devices_roundtrip() {
+    async fn test_load_devices_with_first_seen_roundtrip() {
         let dir = tempfile::TempDir::new().unwrap();
-        let path = dir.path().join("unknown.json");
+        let path = dir.path().join("devices.json");
         let url = format!("file://{}", path.display());
 
         let now = Utc::now();
         let mut devices = HashMap::new();
         devices.insert(
             "ROGUE".to_string(),
-            UnknownDevice {
+            Device {
                 serial: "ROGUE".to_string(),
                 version: Some("15.6".to_string()),
                 hostname: Some("rogue".to_string()),
@@ -536,15 +549,43 @@ mod tests {
                 last_ipv6: None,
                 last_seen_ipv4: None,
                 last_seen_ipv6: None,
-                first_seen: now,
-                last_seen: now,
+                first_seen: Some(now),
             },
         );
 
-        save_unknown_devices(&url, &devices).await.unwrap();
-        let loaded = load_unknown_devices(&url).await;
+        save_devices(&url, &devices).await.unwrap();
+        let loaded = load_devices(&url).await;
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded["ROGUE"].hostname.as_deref(), Some("rogue"));
+        assert!(loaded["ROGUE"].first_seen.is_some());
+    }
+
+    #[tokio::test]
+    async fn test_first_seen_omitted_from_json_when_none() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("no_first_seen.json");
+        let url = format!("file://{}", path.display());
+
+        let mut devices = HashMap::new();
+        devices.insert(
+            "SN001".to_string(),
+            Device {
+                serial: "SN001".to_string(),
+                version: None,
+                hostname: None,
+                model: None,
+                token: None,
+                last_ipv4: None,
+                last_ipv6: None,
+                last_seen_ipv4: None,
+                last_seen_ipv6: None,
+                first_seen: None,
+            },
+        );
+
+        save_devices(&url, &devices).await.unwrap();
+        let json = std::fs::read_to_string(&path).unwrap();
+        assert!(!json.contains("first_seen"), "first_seen should be omitted when None");
     }
 
     #[tokio::test]
@@ -561,18 +602,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_known_devices_empty_url() {
+    async fn test_load_devices_empty_url() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("empty.json");
         std::fs::write(&path, "").unwrap();
         let url = format!("file://{}", path.display());
 
-        let loaded = load_known_devices(&url).await;
+        let loaded = load_devices(&url).await;
         assert!(loaded.is_empty());
     }
 
     #[tokio::test]
-    async fn test_save_known_devices_sorted() {
+    async fn test_save_devices_sorted() {
         let dir = tempfile::TempDir::new().unwrap();
         let path = dir.path().join("sorted.json");
         let url = format!("file://{}", path.display());
@@ -581,7 +622,7 @@ mod tests {
         for serial in &["ZZZ", "AAA", "MMM"] {
             devices.insert(
                 serial.to_string(),
-                KnownDevice {
+                Device {
                     serial: serial.to_string(),
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
@@ -591,11 +632,12 @@ mod tests {
                     last_ipv6: None,
                     last_seen_ipv4: None,
                     last_seen_ipv6: None,
+                    first_seen: None,
                 },
             );
         }
 
-        save_known_devices(&url, &devices).await.unwrap();
+        save_devices(&url, &devices).await.unwrap();
         let json = std::fs::read_to_string(&path).unwrap();
 
         // AAA should appear before MMM, which should appear before ZZZ

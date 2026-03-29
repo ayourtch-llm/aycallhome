@@ -53,8 +53,8 @@ pub struct Cli {
 // ─── Shared state ────────────────────────────────────────────────────────────
 
 pub struct AppState {
-    pub known_devices: RwLock<HashMap<String, KnownDevice>>,
-    pub unknown_devices: RwLock<HashMap<String, UnknownDevice>>,
+    pub known_devices: RwLock<HashMap<String, Device>>,
+    pub unknown_devices: RwLock<HashMap<String, Device>>,
     pub permitted_serials: RwLock<HashSet<String>>,
     pub unknown_request_timestamps: Mutex<VecDeque<Instant>>,
     pub config: Cli,
@@ -104,10 +104,12 @@ pub async fn maybe_evict_unknown(state: &AppState) {
         unknown.retain(|_, dev| {
             // Convert last_seen (UTC) to an approximate Instant for comparison.
             // We use the current wall time minus how long ago last_seen was.
-            let age_secs = (Utc::now() - dev.last_seen).num_seconds().max(0) as u64;
-            let approx_last_seen = now.checked_sub(std::time::Duration::from_secs(age_secs));
-            match approx_last_seen {
-                Some(t) => t > cutoff,
+            match dev.last_seen() {
+                Some(last_seen) => {
+                    let age_secs = (Utc::now() - last_seen).num_seconds().max(0) as u64;
+                    let approx = now.checked_sub(std::time::Duration::from_secs(age_secs));
+                    approx.map(|t| t > cutoff).unwrap_or(false)
+                }
                 None => false,
             }
         });
@@ -166,7 +168,7 @@ pub async fn register_handler(
         let mut known = state.known_devices.write().await;
         let entry = known
             .entry(params.serial.clone())
-            .or_insert_with(|| KnownDevice {
+            .or_insert_with(|| Device {
                 serial: params.serial.clone(),
                 version: None,
                 hostname: None,
@@ -176,6 +178,7 @@ pub async fn register_handler(
                 last_ipv6: None,
                 last_seen_ipv4: None,
                 last_seen_ipv6: None,
+                first_seen: Some(now),
             });
         if params.version.is_some() {
             entry.version = params.version.clone();
@@ -217,7 +220,7 @@ pub async fn register_handler(
             let entry =
                 unknown
                     .entry(params.serial.clone())
-                    .or_insert_with(|| UnknownDevice {
+                    .or_insert_with(|| Device {
                         serial: params.serial.clone(),
                         version: None,
                         hostname: None,
@@ -227,8 +230,7 @@ pub async fn register_handler(
                         last_ipv6: None,
                         last_seen_ipv4: None,
                         last_seen_ipv6: None,
-                        first_seen: now,
-                        last_seen: now,
+                        first_seen: Some(now),
                     });
             if params.version.is_some() {
                 entry.version = params.version.clone();
@@ -242,7 +244,6 @@ pub async fn register_handler(
             if params.token.is_some() {
                 entry.token = params.token.clone();
             }
-            entry.last_seen = now;
             if is_ipv4 {
                 entry.last_ipv4 = Some(ip_str.clone());
                 entry.last_seen_ipv4 = Some(now);
@@ -308,7 +309,7 @@ async fn save_known_task(state: Arc<AppState>) {
         tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
         let url = state.config.known_url.clone();
         let devices = state.known_devices.read().await.clone();
-        match save_known_devices(&url, &devices).await {
+        match save_devices(&url, &devices).await {
             Ok(()) => info!("saved known devices to {}", url),
             Err(e) => warn!("{}", e),
         }
@@ -324,7 +325,7 @@ async fn save_unknown_task(state: Arc<AppState>) {
         tokio::time::sleep(throttle).await;
         let url = state.config.unknown_url.clone();
         let devices = state.unknown_devices.read().await.clone();
-        match save_unknown_devices(&url, &devices).await {
+        match save_devices(&url, &devices).await {
             Ok(()) => info!("saved unknown devices to {}", url),
             Err(e) => warn!("{}", e),
         }
@@ -341,7 +342,7 @@ async fn main() {
     let state = AppState::new(cli.clone());
 
     // Load known devices at startup
-    let known = load_known_devices(&cli.known_url).await;
+    let known = load_devices(&cli.known_url).await;
     if !known.is_empty() {
         info!("loaded {} known devices", known.len());
     } else {
@@ -738,8 +739,9 @@ mod tests {
 
         let unknown = state.unknown_devices.read().await;
         let dev = &unknown["NEWROGUE"];
-        // first_seen and last_seen should be very close to now
-        let age = Utc::now() - dev.first_seen;
+        // first_seen should be very close to now
+        let first_seen = dev.first_seen.expect("first_seen should be set");
+        let age = Utc::now() - first_seen;
         assert!(age.num_seconds() < 5, "first_seen should be recent");
     }
 
@@ -772,7 +774,7 @@ mod tests {
             "first_seen must not change on re-registration"
         );
         // last_seen should be >= first_seen
-        assert!(dev.last_seen >= dev.first_seen);
+        assert!(dev.last_seen() >= dev.first_seen);
     }
 
     // ── FIFO eviction ────────────────────────────────────────────────────────
@@ -796,7 +798,7 @@ mod tests {
             let mut unknown = state.unknown_devices.write().await;
             unknown.insert(
                 "KEEP".to_string(),
-                UnknownDevice {
+                Device {
                     serial: "KEEP".to_string(),
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
@@ -804,10 +806,9 @@ mod tests {
                     token: None,
                     last_ipv4: None,
                     last_ipv6: None,
-                    last_seen_ipv4: None,
+                    last_seen_ipv4: Some(now),
                     last_seen_ipv6: None,
-                    first_seen: now,
-                    last_seen: now,
+                    first_seen: Some(now),
                 },
             );
         }
@@ -889,7 +890,7 @@ mod tests {
             let mut unknown = state.unknown_devices.write().await;
             unknown.insert(
                 "OLD".to_string(),
-                UnknownDevice {
+                Device {
                     serial: "OLD".to_string(),
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
@@ -897,15 +898,14 @@ mod tests {
                     token: None,
                     last_ipv4: None,
                     last_ipv6: None,
-                    last_seen_ipv4: None,
+                    last_seen_ipv4: Some(old_time),
                     last_seen_ipv6: None,
-                    first_seen: old_time,
-                    last_seen: old_time,
+                    first_seen: Some(old_time),
                 },
             );
             unknown.insert(
                 "RECENT".to_string(),
-                UnknownDevice {
+                Device {
                     serial: "RECENT".to_string(),
                     version: Some("1".to_string()),
                     hostname: Some("h".to_string()),
@@ -913,10 +913,9 @@ mod tests {
                     token: None,
                     last_ipv4: None,
                     last_ipv6: None,
-                    last_seen_ipv4: None,
+                    last_seen_ipv4: Some(recent_time),
                     last_seen_ipv6: None,
-                    first_seen: recent_time,
-                    last_seen: recent_time,
+                    first_seen: Some(recent_time),
                 },
             );
         }
