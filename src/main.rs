@@ -8,11 +8,12 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use clap::Parser;
-use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
+
+use aycallhome::*;
 
 // ─── CLI ────────────────────────────────────────────────────────────────────
 
@@ -42,128 +43,6 @@ pub struct Cli {
     /// Seconds between periodic saves of the known-devices table
     #[arg(long, env = "AYCALLHOME_KNOWN_SAVE_INTERVAL", default_value_t = 60)]
     pub known_save_interval: u64,
-}
-
-// ─── Data model ─────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct KnownDevice {
-    pub serial: String,
-    pub version: String,
-    pub hostname: String,
-    pub model: String,
-    pub last_ipv4: Option<String>,
-    pub last_ipv6: Option<String>,
-    pub last_seen_ipv4: Option<DateTime<Utc>>,
-    pub last_seen_ipv6: Option<DateTime<Utc>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct UnknownDevice {
-    pub serial: String,
-    pub version: String,
-    pub hostname: String,
-    pub model: String,
-    pub last_ipv4: Option<String>,
-    pub last_ipv6: Option<String>,
-    pub last_seen_ipv4: Option<DateTime<Utc>>,
-    pub last_seen_ipv6: Option<DateTime<Utc>>,
-    pub first_seen: DateTime<Utc>,
-    pub last_seen: DateTime<Utc>,
-}
-
-// ─── CallhomeParams (parsed from URL path) ──────────────────────────────────
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CallhomeParams {
-    pub serial: String,
-    pub hostname: String,
-    pub model: String,
-    pub version: String,
-}
-
-/// Parse key=value path segments after `/Register.aspx/`.
-/// Returns `Ok(CallhomeParams)` or an error string describing what's missing/malformed.
-pub fn parse_callhome_path(path: &str) -> Result<CallhomeParams, String> {
-    // Strip the leading "/Register.aspx/" prefix (case-sensitive per spec)
-    let rest = path
-        .strip_prefix("/Register.aspx/")
-        .ok_or_else(|| format!("path does not start with /Register.aspx/: {}", path))?;
-
-    let mut map: HashMap<String, String> = HashMap::new();
-    for segment in rest.split('/') {
-        if segment.is_empty() {
-            continue;
-        }
-        let mut parts = segment.splitn(2, '=');
-        match (parts.next(), parts.next()) {
-            (Some(k), Some(v)) => {
-                map.insert(k.to_ascii_lowercase(), v.to_string());
-            }
-            _ => return Err(format!("malformed path segment: '{}'", segment)),
-        }
-    }
-
-    let mut get = |key: &str| -> Result<String, String> {
-        map.remove(key)
-            .ok_or_else(|| format!("missing required parameter: '{}'", key))
-    };
-
-    Ok(CallhomeParams {
-        serial: get("serial")?,
-        hostname: get("hostname")?,
-        model: get("model")?,
-        version: get("version")?,
-    })
-}
-
-// ─── Whitelist parsing ───────────────────────────────────────────────────────
-
-/// Parse a permitted-serials text: one serial per line; blank lines and
-/// lines starting with `#` are ignored.
-pub fn parse_serial_whitelist(content: &str) -> HashSet<String> {
-    content
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(|l| l.to_string())
-        .collect()
-}
-
-// ─── ASCII art response ──────────────────────────────────────────────────────
-
-pub fn ascii_art_response(serial: &str) -> String {
-    format!(
-        r#"
-   ___      _ _   _                  _
-  / __|__ _| | | | |_  ___ _ __  ___| |
- | (__/ _` | | |_| ' \/ _ \ '  \/ -_)_|
-  \___\__,_|_|\___/_||_\___/_|_|_\___(_)
-
-  Device serial: [ {serial} ]
-
-  Your call-home registration has been received.
-  Have a great day!
-"#,
-        serial = serial
-    )
-}
-
-// ─── IP address classification ───────────────────────────────────────────────
-
-/// Returns `(is_ipv4, canonical_string)` where `is_ipv4` is true for both
-/// real IPv4 addresses and IPv4-mapped IPv6 addresses (::ffff:x.x.x.x).
-pub fn classify_ip(addr: &std::net::IpAddr) -> (bool, String) {
-    match addr {
-        std::net::IpAddr::V4(v4) => (true, v4.to_string()),
-        std::net::IpAddr::V6(v6) => {
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                (true, v4.to_string())
-            } else {
-                (false, v6.to_string())
-            }
-        }
-    }
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
@@ -204,7 +83,11 @@ pub async fn maybe_evict_unknown(state: &AppState) {
         let mut ts = state.unknown_request_timestamps.lock().await;
         ts.push_back(now);
         // Trim entries older than the window
-        while ts.front().map(|t| now.duration_since(*t) > window).unwrap_or(false) {
+        while ts
+            .front()
+            .map(|t| now.duration_since(*t) > window)
+            .unwrap_or(false)
+        {
             ts.pop_front();
         }
         ts.len() > 10_000
@@ -254,16 +137,18 @@ pub async fn register_handler(
 
     if permitted {
         let mut known = state.known_devices.write().await;
-        let entry = known.entry(params.serial.clone()).or_insert_with(|| KnownDevice {
-            serial: params.serial.clone(),
-            version: params.version.clone(),
-            hostname: params.hostname.clone(),
-            model: params.model.clone(),
-            last_ipv4: None,
-            last_ipv6: None,
-            last_seen_ipv4: None,
-            last_seen_ipv6: None,
-        });
+        let entry = known
+            .entry(params.serial.clone())
+            .or_insert_with(|| KnownDevice {
+                serial: params.serial.clone(),
+                version: params.version.clone(),
+                hostname: params.hostname.clone(),
+                model: params.model.clone(),
+                last_ipv4: None,
+                last_ipv6: None,
+                last_seen_ipv4: None,
+                last_seen_ipv6: None,
+            });
         entry.version = params.version.clone();
         entry.hostname = params.hostname.clone();
         entry.model = params.model.clone();
@@ -278,26 +163,35 @@ pub async fn register_handler(
         {
             let mut unknown = state.unknown_devices.write().await;
             if unknown.remove(&params.serial).is_some() {
-                info!("promoted device from unknown to known: serial={}", params.serial);
+                info!(
+                    "promoted device from unknown to known: serial={}",
+                    params.serial
+                );
                 state.unknown_save_notify.notify_one();
             }
         }
-        info!("known device registered: serial={} ip={}", params.serial, ip_str);
+        info!(
+            "known device registered: serial={} ip={}",
+            params.serial, ip_str
+        );
     } else {
         {
             let mut unknown = state.unknown_devices.write().await;
-            let entry = unknown.entry(params.serial.clone()).or_insert_with(|| UnknownDevice {
-                serial: params.serial.clone(),
-                version: params.version.clone(),
-                hostname: params.hostname.clone(),
-                model: params.model.clone(),
-                last_ipv4: None,
-                last_ipv6: None,
-                last_seen_ipv4: None,
-                last_seen_ipv6: None,
-                first_seen: now,
-                last_seen: now,
-            });
+            let entry =
+                unknown
+                    .entry(params.serial.clone())
+                    .or_insert_with(|| UnknownDevice {
+                        serial: params.serial.clone(),
+                        version: params.version.clone(),
+                        hostname: params.hostname.clone(),
+                        model: params.model.clone(),
+                        last_ipv4: None,
+                        last_ipv6: None,
+                        last_seen_ipv4: None,
+                        last_seen_ipv6: None,
+                        first_seen: now,
+                        last_seen: now,
+                    });
             entry.version = params.version.clone();
             entry.hostname = params.hostname.clone();
             entry.model = params.model.clone();
@@ -310,18 +204,16 @@ pub async fn register_handler(
                 entry.last_seen_ipv6 = Some(now);
             }
         }
-        warn!("unknown device registered: serial={} ip={}", params.serial, ip_str);
+        warn!(
+            "unknown device registered: serial={} ip={}",
+            params.serial, ip_str
+        );
         state.unknown_save_notify.notify_one();
         maybe_evict_unknown(&state).await;
     }
 
     let body = ascii_art_response(&params.serial);
-    (
-        StatusCode::OK,
-        [("content-type", "text/plain")],
-        body,
-    )
-        .into_response()
+    (StatusCode::OK, [("content-type", "text/plain")], body).into_response()
 }
 
 // ─── Router builder (shared with integration tests) ─────────────────────────
@@ -354,17 +246,11 @@ async fn refresh_serials_task(state: Arc<AppState>) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
         let url = state.config.serial_url.clone();
-        match ayurl::get(&url).await {
-            Ok(resp) => match resp.text().await {
-                Ok(text) => {
-                    let set = parse_serial_whitelist(&text);
-                    info!("refreshed {} permitted serials from {}", set.len(), url);
-                    *state.permitted_serials.write().await = set;
-                }
-                Err(e) => warn!("failed to read serial whitelist body: {}", e),
-            },
-            Err(e) => warn!("failed to fetch serial whitelist from {}: {}", url, e),
+        let set = load_serial_whitelist(&url).await;
+        if !set.is_empty() {
+            info!("refreshed {} permitted serials from {}", set.len(), url);
         }
+        *state.permitted_serials.write().await = set;
     }
 }
 
@@ -373,21 +259,10 @@ async fn save_known_task(state: Arc<AppState>) {
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(interval)).await;
         let url = state.config.known_url.clone();
-        let data = {
-            let known = state.known_devices.read().await;
-            let mut devices: Vec<&KnownDevice> = known.values().collect();
-            devices.sort_by(|a, b| a.serial.cmp(&b.serial));
-            serde_json::to_string_pretty(&devices)
-        };
-        match data {
-            Ok(json) => {
-                if let Err(e) = ayurl::put(&url).text(json).await {
-                    warn!("failed to save known devices to {}: {}", url, e);
-                } else {
-                    info!("saved known devices to {}", url);
-                }
-            }
-            Err(e) => warn!("failed to serialize known devices: {}", e),
+        let devices = state.known_devices.read().await.clone();
+        match save_known_devices(&url, &devices).await {
+            Ok(()) => info!("saved known devices to {}", url),
+            Err(e) => warn!("{}", e),
         }
     }
 }
@@ -400,21 +275,10 @@ async fn save_unknown_task(state: Arc<AppState>) {
         // Throttle: sleep 30 seconds, ignoring any further notifications during that time
         tokio::time::sleep(throttle).await;
         let url = state.config.unknown_url.clone();
-        let data = {
-            let unknown = state.unknown_devices.read().await;
-            let mut devices: Vec<&UnknownDevice> = unknown.values().collect();
-            devices.sort_by(|a, b| a.serial.cmp(&b.serial));
-            serde_json::to_string_pretty(&devices)
-        };
-        match data {
-            Ok(json) => {
-                if let Err(e) = ayurl::put(&url).text(json).await {
-                    warn!("failed to save unknown devices to {}: {}", url, e);
-                } else {
-                    info!("saved unknown devices to {}", url);
-                }
-            }
-            Err(e) => warn!("failed to serialize unknown devices: {}", e),
+        let devices = state.unknown_devices.read().await.clone();
+        match save_unknown_devices(&url, &devices).await {
+            Ok(()) => info!("saved unknown devices to {}", url),
+            Err(e) => warn!("{}", e),
         }
     }
 }
@@ -429,37 +293,18 @@ async fn main() {
     let state = AppState::new(cli.clone());
 
     // Load known devices at startup
-    match ayurl::get(&cli.known_url).await {
-        Ok(resp) => match resp.text().await {
-            Ok(text) if !text.trim().is_empty() => {
-                match serde_json::from_str::<Vec<KnownDevice>>(&text) {
-                    Ok(devices) => {
-                        let mut known = state.known_devices.write().await;
-                        for d in devices {
-                            known.insert(d.serial.clone(), d);
-                        }
-                        info!("loaded {} known devices", known.len());
-                    }
-                    Err(e) => warn!("failed to parse known devices JSON: {}", e),
-                }
-            }
-            _ => info!("starting with empty known-devices table"),
-        },
-        Err(e) => warn!("could not load known devices from {}: {}", cli.known_url, e),
+    let known = load_known_devices(&cli.known_url).await;
+    if !known.is_empty() {
+        info!("loaded {} known devices", known.len());
+    } else {
+        info!("starting with empty known-devices table");
     }
+    *state.known_devices.write().await = known;
 
     // Load initial serial whitelist
-    match ayurl::get(&cli.serial_url).await {
-        Ok(resp) => match resp.text().await {
-            Ok(text) => {
-                let set = parse_serial_whitelist(&text);
-                info!("loaded {} permitted serials", set.len());
-                *state.permitted_serials.write().await = set;
-            }
-            Err(e) => warn!("failed to read serial whitelist: {}", e),
-        },
-        Err(e) => warn!("could not load serials from {}: {}", cli.serial_url, e),
-    }
+    let serials = load_serial_whitelist(&cli.serial_url).await;
+    info!("loaded {} permitted serials", serials.len());
+    *state.permitted_serials.write().await = serials;
 
     // Spawn background tasks
     tokio::spawn(refresh_serials_task(state.clone()));
@@ -469,10 +314,12 @@ async fn main() {
     let router = build_router(state.clone());
 
     let bind_addr = format!("{}:{}", cli.listen_addr, cli.port);
-    let listener = tokio::net::TcpListener::bind(&bind_addr).await.unwrap_or_else(|e| {
-        eprintln!("Failed to bind to {}: {}", bind_addr, e);
-        std::process::exit(1);
-    });
+    let listener = tokio::net::TcpListener::bind(&bind_addr)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to bind to {}: {}", bind_addr, e);
+            std::process::exit(1);
+        });
     info!("listening on {}", listener.local_addr().unwrap());
 
     axum::serve(
@@ -488,178 +335,6 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::IpAddr;
-
-    // ── parse_callhome_path ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_parse_standard_order() {
-        let p = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/hostname=router1/model=C9300/version=17.03",
-        )
-        .unwrap();
-        assert_eq!(p.serial, "FCW1234");
-        assert_eq!(p.hostname, "router1");
-        assert_eq!(p.model, "C9300");
-        assert_eq!(p.version, "17.03");
-    }
-
-    #[test]
-    fn test_parse_any_order() {
-        let p = parse_callhome_path(
-            "/Register.aspx/version=17.03/model=C9300/serial=FCW1234/hostname=router1",
-        )
-        .unwrap();
-        assert_eq!(p.serial, "FCW1234");
-        assert_eq!(p.hostname, "router1");
-        assert_eq!(p.model, "C9300");
-        assert_eq!(p.version, "17.03");
-    }
-
-    #[test]
-    fn test_parse_missing_serial() {
-        let err = parse_callhome_path(
-            "/Register.aspx/hostname=router1/model=C9300/version=17.03",
-        )
-        .unwrap_err();
-        assert!(err.contains("serial"), "expected 'serial' in error: {}", err);
-    }
-
-    #[test]
-    fn test_parse_missing_hostname() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/model=C9300/version=17.03",
-        )
-        .unwrap_err();
-        assert!(err.contains("hostname"), "expected 'hostname' in error: {}", err);
-    }
-
-    #[test]
-    fn test_parse_missing_model() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/hostname=router1/version=17.03",
-        )
-        .unwrap_err();
-        assert!(err.contains("model"), "expected 'model' in error: {}", err);
-    }
-
-    #[test]
-    fn test_parse_missing_version() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/hostname=router1/model=C9300",
-        )
-        .unwrap_err();
-        assert!(err.contains("version"), "expected 'version' in error: {}", err);
-    }
-
-    #[test]
-    fn test_parse_wrong_prefix() {
-        let err =
-            parse_callhome_path("/other/serial=FCW1234/hostname=r/model=C/version=1").unwrap_err();
-        assert!(err.contains("Register.aspx"));
-    }
-
-    #[test]
-    fn test_parse_malformed_segment() {
-        let err = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/badnoequals/hostname=r/model=C/version=1",
-        )
-        .unwrap_err();
-        assert!(err.contains("malformed"), "expected 'malformed' in: {}", err);
-    }
-
-    #[test]
-    fn test_parse_value_with_dots_and_parens() {
-        // IOS version strings look like "15.6(3)M7"
-        let p = parse_callhome_path(
-            "/Register.aspx/serial=FCW1234/hostname=router1/model=ISR4331/version=15.6(3)M7",
-        )
-        .unwrap();
-        assert_eq!(p.version, "15.6(3)M7");
-    }
-
-    // ── parse_serial_whitelist ───────────────────────────────────────────────
-
-    #[test]
-    fn test_whitelist_basic() {
-        let set = parse_serial_whitelist("FCW1234\nFCW5678\n");
-        assert!(set.contains("FCW1234"));
-        assert!(set.contains("FCW5678"));
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn test_whitelist_ignores_comments() {
-        let set = parse_serial_whitelist("# this is a comment\nFCW1234\n# another\n");
-        assert!(!set.contains("# this is a comment"));
-        assert!(set.contains("FCW1234"));
-        assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn test_whitelist_ignores_blank_lines() {
-        let set = parse_serial_whitelist("\n\nFCW1234\n\n");
-        assert!(set.contains("FCW1234"));
-        assert_eq!(set.len(), 1);
-    }
-
-    #[test]
-    fn test_whitelist_trims_whitespace() {
-        let set = parse_serial_whitelist("  FCW1234  \n  FCW5678  \n");
-        assert!(set.contains("FCW1234"));
-        assert!(set.contains("FCW5678"));
-    }
-
-    #[test]
-    fn test_whitelist_empty() {
-        let set = parse_serial_whitelist("# only comments\n\n");
-        assert!(set.is_empty());
-    }
-
-    // ── ascii_art_response ───────────────────────────────────────────────────
-
-    #[test]
-    fn test_ascii_art_contains_serial() {
-        let serial = "FCW2345G0AB";
-        let body = ascii_art_response(serial);
-        assert!(
-            body.contains(serial),
-            "ASCII art response should contain serial number"
-        );
-    }
-
-    #[test]
-    fn test_ascii_art_nonempty() {
-        let body = ascii_art_response("TEST123");
-        assert!(!body.trim().is_empty());
-    }
-
-    // ── classify_ip ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_classify_ipv4() {
-        let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        let (is_v4, s) = classify_ip(&ip);
-        assert!(is_v4);
-        assert_eq!(s, "192.168.1.1");
-    }
-
-    #[test]
-    fn test_classify_ipv6() {
-        let ip: IpAddr = "2001:db8::1".parse().unwrap();
-        let (is_v4, s) = classify_ip(&ip);
-        assert!(!is_v4);
-        assert_eq!(s, "2001:db8::1");
-    }
-
-    #[test]
-    fn test_classify_ipv4_mapped_ipv6() {
-        // ::ffff:192.168.1.1
-        let ip: IpAddr = "::ffff:192.168.1.1".parse().unwrap();
-        let (is_v4, s) = classify_ip(&ip);
-        assert!(is_v4, "IPv4-mapped IPv6 should be classified as IPv4");
-        assert_eq!(s, "192.168.1.1");
-    }
 
     // ── integration tests ────────────────────────────────────────────────────
     //
@@ -681,8 +356,7 @@ mod tests {
     }
 
     fn make_test_server(state: Arc<AppState>) -> axum_test::TestServer {
-        let app = build_router(state)
-            .into_make_service_with_connect_info::<SocketAddr>();
+        let app = build_router(state).into_make_service_with_connect_info::<SocketAddr>();
         axum_test::TestServer::builder()
             .http_transport()
             .build(app)
@@ -743,11 +417,16 @@ mod tests {
 
         let server = make_test_server(state.clone());
         server
-            .get("/Register.aspx/serial=FCW5678/hostname=sw-floor2/model=C9300-48P/version=17.03.04a")
+            .get(
+                "/Register.aspx/serial=FCW5678/hostname=sw-floor2/model=C9300-48P/version=17.03.04a",
+            )
             .await;
 
         let known = state.known_devices.read().await;
-        assert!(known.contains_key("FCW5678"), "device should be in known table");
+        assert!(
+            known.contains_key("FCW5678"),
+            "device should be in known table"
+        );
         let dev = &known["FCW5678"];
         assert_eq!(dev.hostname, "sw-floor2");
         assert_eq!(dev.model, "C9300-48P");
@@ -883,7 +562,10 @@ mod tests {
 
         let unknown = state.unknown_devices.read().await;
         let dev = &unknown["UPDATEROGUE"];
-        assert_eq!(dev.first_seen, first_seen, "first_seen must not change on re-registration");
+        assert_eq!(
+            dev.first_seen, first_seen,
+            "first_seen must not change on re-registration"
+        );
         // last_seen should be >= first_seen
         assert!(dev.last_seen >= dev.first_seen);
     }
