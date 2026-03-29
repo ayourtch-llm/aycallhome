@@ -274,6 +274,14 @@ pub async fn register_handler(
             entry.last_ipv6 = Some(ip_str.clone());
             entry.last_seen_ipv6 = Some(now);
         }
+        // If the device was previously unknown, remove it
+        {
+            let mut unknown = state.unknown_devices.write().await;
+            if unknown.remove(&params.serial).is_some() {
+                info!("promoted device from unknown to known: serial={}", params.serial);
+                state.unknown_save_notify.notify_one();
+            }
+        }
         info!("known device registered: serial={} ip={}", params.serial, ip_str);
     } else {
         {
@@ -367,8 +375,9 @@ async fn save_known_task(state: Arc<AppState>) {
         let url = state.config.known_url.clone();
         let data = {
             let known = state.known_devices.read().await;
-            let devices: Vec<&KnownDevice> = known.values().collect();
-            serde_json::to_string(&devices)
+            let mut devices: Vec<&KnownDevice> = known.values().collect();
+            devices.sort_by(|a, b| a.serial.cmp(&b.serial));
+            serde_json::to_string_pretty(&devices)
         };
         match data {
             Ok(json) => {
@@ -393,8 +402,9 @@ async fn save_unknown_task(state: Arc<AppState>) {
         let url = state.config.unknown_url.clone();
         let data = {
             let unknown = state.unknown_devices.read().await;
-            let devices: Vec<&UnknownDevice> = unknown.values().collect();
-            serde_json::to_string(&devices)
+            let mut devices: Vec<&UnknownDevice> = unknown.values().collect();
+            devices.sort_by(|a, b| a.serial.cmp(&b.serial));
+            serde_json::to_string_pretty(&devices)
         };
         match data {
             Ok(json) => {
@@ -920,6 +930,54 @@ mod tests {
 
         let unknown = state.unknown_devices.read().await;
         assert!(unknown.contains_key("KEEP"), "device should NOT be evicted");
+    }
+
+    #[tokio::test]
+    async fn test_device_promoted_from_unknown_to_known_removes_from_unknown() {
+        let state = make_test_state();
+        let server = make_test_server(state.clone());
+
+        // Step 1: device calls home while NOT in permitted list → lands in unknown
+        server
+            .get("/Register.aspx/serial=PROMO001/hostname=sw1/model=C9300/version=17.03")
+            .await;
+        {
+            let unknown = state.unknown_devices.read().await;
+            assert!(
+                unknown.contains_key("PROMO001"),
+                "device should be in unknown table after first call-home"
+            );
+        }
+
+        // Step 2: add the serial to the permitted list (simulates whitelist reload)
+        state
+            .permitted_serials
+            .write()
+            .await
+            .insert("PROMO001".to_string());
+
+        // Step 3: device calls home again, now it IS permitted
+        server
+            .get("/Register.aspx/serial=PROMO001/hostname=sw1/model=C9300/version=17.03")
+            .await;
+
+        // It should now be in the known table
+        {
+            let known = state.known_devices.read().await;
+            assert!(
+                known.contains_key("PROMO001"),
+                "device should be in known table after promotion"
+            );
+        }
+
+        // And it should be REMOVED from the unknown table
+        {
+            let unknown = state.unknown_devices.read().await;
+            assert!(
+                !unknown.contains_key("PROMO001"),
+                "device should be removed from unknown table after promotion"
+            );
+        }
     }
 
     #[tokio::test]
