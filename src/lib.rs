@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use indexmap::IndexMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -171,6 +173,30 @@ pub async fn load_devices(url: &str) -> HashMap<String, Device> {
         Err(e) => {
             tracing::warn!("could not load devices from {}: {}", url, e);
             HashMap::new()
+        }
+    }
+}
+
+/// Load devices from a URL (JSON array), preserving insertion order.
+/// Returns an `IndexMap` so callers that need deterministic key ordering get it.
+/// Returns an empty map if the URL is empty or unreachable.
+pub async fn load_devices_ordered(url: &str) -> IndexMap<String, Device> {
+    match ayurl::get(url).await {
+        Ok(resp) => match resp.text().await {
+            Ok(text) if !text.trim().is_empty() => {
+                match serde_json::from_str::<Vec<Device>>(&text) {
+                    Ok(devices) => devices.into_iter().map(|d| (d.serial.clone(), d)).collect(),
+                    Err(e) => {
+                        tracing::warn!("failed to parse devices JSON from {}: {}", url, e);
+                        IndexMap::new()
+                    }
+                }
+            }
+            _ => IndexMap::new(),
+        },
+        Err(e) => {
+            tracing::warn!("could not load devices from {}: {}", url, e);
+            IndexMap::new()
         }
     }
 }
@@ -610,6 +636,27 @@ mod tests {
 
         let loaded = load_devices(&url).await;
         assert!(loaded.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_load_devices_ordered_from_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("ordered.json");
+        // Write a JSON array with a specific order: ZZZ, AAA, MMM
+        let json = r#"[
+            {"serial":"ZZZ","version":null,"hostname":null,"model":null,"token":null,"last_ipv4":null,"last_ipv6":null,"last_seen_ipv4":null,"last_seen_ipv6":null},
+            {"serial":"AAA","version":null,"hostname":null,"model":null,"token":null,"last_ipv4":null,"last_ipv6":null,"last_seen_ipv4":null,"last_seen_ipv6":null},
+            {"serial":"MMM","version":null,"hostname":null,"model":null,"token":null,"last_ipv4":null,"last_ipv6":null,"last_seen_ipv4":null,"last_seen_ipv6":null}
+        ]"#;
+        std::fs::write(&path, json).unwrap();
+        let url = format!("file://{}", path.display());
+
+        let loaded = load_devices_ordered(&url).await;
+        assert_eq!(loaded.len(), 3);
+
+        // Verify insertion order is preserved (ZZZ first, then AAA, then MMM)
+        let keys: Vec<&str> = loaded.keys().map(|s| s.as_str()).collect();
+        assert_eq!(keys, vec!["ZZZ", "AAA", "MMM"]);
     }
 
     #[tokio::test]
