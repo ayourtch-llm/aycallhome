@@ -201,6 +201,28 @@ pub async fn load_devices_ordered(url: &str) -> IndexMap<String, Device> {
     }
 }
 
+/// Load devices from a URL (JSON array), preserving insertion order.
+/// Returns `Err` if the URL is empty, the HTTP request fails, or JSON parsing fails.
+/// Returns `Ok(empty IndexMap)` if the response body is empty (zero devices registered).
+pub async fn try_load_devices_ordered(url: &str) -> Result<IndexMap<String, Device>, String> {
+    if url.is_empty() {
+        return Err("empty URL".to_string());
+    }
+    let resp = ayurl::get(url)
+        .await
+        .map_err(|e| format!("failed to fetch {}: {}", url, e))?;
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| format!("failed to read response body from {}: {}", url, e))?;
+    if text.trim().is_empty() {
+        return Ok(IndexMap::new());
+    }
+    let devices: Vec<Device> = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse devices JSON from {}: {}", url, e))?;
+    Ok(devices.into_iter().map(|d| (d.serial.clone(), d)).collect())
+}
+
 /// Load the serial whitelist from a URL (one serial per line).
 /// Returns an empty set if the URL is unreachable.
 pub async fn load_serial_whitelist(url: &str) -> HashSet<String> {
@@ -657,6 +679,64 @@ mod tests {
         // Verify insertion order is preserved (ZZZ first, then AAA, then MMM)
         let keys: Vec<&str> = loaded.keys().map(|s| s.as_str()).collect();
         assert_eq!(keys, vec!["ZZZ", "AAA", "MMM"]);
+    }
+
+    // ── try_load_devices_ordered ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_try_load_devices_ordered_empty_url_returns_err() {
+        let result = try_load_devices_ordered("").await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "empty URL");
+    }
+
+    #[tokio::test]
+    async fn test_try_load_devices_ordered_empty_body_returns_ok_empty() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("empty.json");
+        std::fs::write(&path, "").unwrap();
+        let url = format!("file://{}", path.display());
+
+        let result = try_load_devices_ordered(&url).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_try_load_devices_ordered_invalid_json_returns_err() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("bad.json");
+        std::fs::write(&path, "not valid json").unwrap();
+        let url = format!("file://{}", path.display());
+
+        let result = try_load_devices_ordered(&url).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("failed to parse devices JSON"));
+    }
+
+    #[tokio::test]
+    async fn test_try_load_devices_ordered_valid_returns_ok_with_devices() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("devices.json");
+        let json = r#"[
+            {"serial":"ZZZ","version":null,"hostname":null,"model":null,"token":null,"last_ipv4":null,"last_ipv6":null,"last_seen_ipv4":null,"last_seen_ipv6":null},
+            {"serial":"AAA","version":null,"hostname":null,"model":null,"token":null,"last_ipv4":null,"last_ipv6":null,"last_seen_ipv4":null,"last_seen_ipv6":null}
+        ]"#;
+        std::fs::write(&path, json).unwrap();
+        let url = format!("file://{}", path.display());
+
+        let result = try_load_devices_ordered(&url).await;
+        assert!(result.is_ok());
+        let map = result.unwrap();
+        assert_eq!(map.len(), 2);
+        let keys: Vec<&str> = map.keys().map(|s| s.as_str()).collect();
+        assert_eq!(keys, vec!["ZZZ", "AAA"]);
+    }
+
+    #[tokio::test]
+    async fn test_try_load_devices_ordered_bad_url_returns_err() {
+        let result = try_load_devices_ordered("file:///nonexistent/path/devices.json").await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
